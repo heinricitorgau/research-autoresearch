@@ -34,21 +34,27 @@
 
 **需求**：單張 NVIDIA GPU（目前在 H100 上測過）、Python 3.10+、[uv](https://docs.astral.sh/uv/)
 
+這個 repo 目前用 [`.python-version`](/Users/test/research-autoresearch/.python-version) 固定在 `Python 3.10`。如果你有安裝 `pyenv` 或相容工具，進入專案目錄時通常會自動切到這個版本；沒有的話，也建議手動建立一個 Python 3.10 的環境來跑實驗，避免依賴解析或 wheel 相容性出現偏差。
+
 ```bash
 # 1. 安裝 uv（如果還沒有）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. 安裝依賴
+# 2. 切到 Python 3.10（若你使用 pyenv）
+pyenv install 3.10 -s
+pyenv local 3.10
+
+# 3. 安裝依賴
 uv sync
 
-# 3. 準備資料與 tokenizer（一次性，約 2 分鐘）
+# 4. 準備資料與 tokenizer（一次性，約 2 分鐘）
 uv run prepare.py
 
-# 4. 手動跑一次基線實驗（約 5 分鐘）
+# 5. 手動跑一次基線實驗（約 5 分鐘）
 uv run train.py
 ```
 
-如果這四步都能成功完成，你就已經具備進入自動化研究回圈的最小條件。
+如果這五步都能成功完成，你就已經具備進入自動化研究回圈的最小條件。
 
 ## 如何進入自主實驗模式
 
