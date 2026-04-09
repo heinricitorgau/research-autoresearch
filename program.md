@@ -1,48 +1,99 @@
-# autoresearch
+# autoresearch protocol
 
-This is an experiment to have the LLM do its own research.
+這不是一般的 coding 任務；這是一個持續產生、執行、比較、保留實驗的研究回圈。你的角色不是一次性把 `train.py` 改到「看起來比較好」，而是像一個自主研究員一樣，在固定邊界內不斷提出假設、跑實驗、判斷結果，然後只留下真正通過驗證的改動。
+
+這個 repo 的研究模型很簡單：
+
+- `prepare.py` 定義固定實驗環境。
+- `train.py` 承載幾乎所有可變的實驗想法。
+- 你負責把 `train.py` 變成一串可比較的實驗序列，而不是一堆無法回溯的改動。
+
+你的唯一目標是：在固定 5 分鐘訓練預算內，持續把 `val_bpb` 往下壓。
+
+## 實驗心法
+
+每一輪都應該被當成一個真正的實驗，而不是隨手嘗試：
+
+- 要有明確假設：你必須知道自己這次在測什麼。
+- 要有單一主要變因：盡量避免一次混進太多互相糾纏的改動。
+- 要有可比較結果：所有判斷都回到 `val_bpb`、記憶體成本、程式複雜度。
+- 要有保留/丟棄決策：不是每個想法都值得留下。
+
+這裡的研究產出不是單次靈感，而是一條乾淨的演化路徑。
 
 ## Setup
 
-To set up a new experiment, work with the user to:
+在開始實驗前，先把研究場初始化好。和使用者協作完成以下事項：
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+1. 決定一個 run tag。用日期為基礎提議，例如 `apr9`；分支名稱應為 `autoresearch/<tag>`，而且必須是新的。
+2. 建立實驗分支。從目前主線切出 `git checkout -b autoresearch/<tag>`。
+3. 讀完 in-scope 檔案。這個 repo 很小，至少要完整理解：
+   - `README.md`：整體研究設定與設計意圖。
+   - `prepare.py`：固定常數、資料準備、tokenizer、dataloader、evaluation。不可修改。
+   - `train.py`：唯一主要實驗面。你會反覆修改這個檔案。
+4. 確認資料已存在。檢查 `~/.cache/autoresearch/` 是否有 data shards 與 tokenizer；如果沒有，請告知人類先執行 `uv run prepare.py`。
+5. 初始化 `results.tsv`。建立只有 header 的 TSV，基線結果在第一次 run 後補上。
+6. 確認研究場 ready。確認 branch、資料、檔案理解與紀錄檔都已就緒，再開始跑實驗。
 
-Once you get confirmation, kick off the experimentation.
+一旦 setup 完成並獲得確認，就進入實驗模式，不要停留在準備階段。
 
-## Experimentation
+## 固定規則
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+每個實驗都在單張 GPU 上執行，指令是：
 
-**What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
-
-**What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
-
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
-
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
-
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
-
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
-
-## Output format
-
-Once the script finishes it prints a summary like this:
-
+```bash
+uv run train.py
 ```
+
+整個實驗制度有幾個不可動的固定點：
+
+- 訓練時間預算固定為 **5 分鐘 wall clock**，不包含 startup/compilation。
+- 主要指標是 **`val_bpb`**，越低越好。
+- `prepare.py` 是固定實驗環境的一部分，不可修改。
+- `evaluate_bpb` 是唯一可信的評估標準，不可繞過、替換或重新定義。
+- 不可新增依賴或安裝新套件；只能用 `pyproject.toml` 已經存在的內容。
+
+可以動的只有研究變因，而不是實驗制度本身。
+
+## 你可以做什麼
+
+- 修改 `train.py`
+- 調整模型架構
+- 調整 optimizer 與 scheduler
+- 修改 hyperparameters
+- 改 batch、寬度、深度、attention pattern、訓練流程細節
+- 刪掉無效複雜度，只要結果沒有變差甚至更好
+
+## 你不能做什麼
+
+- 修改 `prepare.py`
+- 修改 evaluation harness
+- 安裝新套件或引入新依賴
+- 用沒有被記錄的手動操作污染實驗
+
+## 成功標準
+
+不是所有改善都值得保留。你的判斷標準如下：
+
+1. **`val_bpb` 是否真的變低**
+2. **VRAM 成本是否合理**
+3. **程式是否仍然簡潔可維護**
+
+`VRAM` 是軟約束。若有明顯收益，適度增加可以接受；如果只是為了微小收益卻大幅膨脹記憶體，就不值得。
+
+簡潔性同樣重要。若兩個結果相近，優先保留更簡單的版本。刪掉程式碼卻拿到同等或更好成績，是高品質勝利。相反地，若只是得到極小幅度改善，卻引入一堆脆弱、難懂、難維護的 hack，通常不該保留。
+
+## 第一個實驗
+
+第一個 run 永遠是基線實驗。
+
+不要先做任何改動，直接執行原始 `train.py`，把它當成後續所有判斷的參考座標。
+
+## 輸出判讀
+
+每次訓練完成後，script 會印出類似這樣的摘要：
+
+```text
 ---
 val_bpb:          0.997900
 training_seconds: 300.1
@@ -55,31 +106,35 @@ num_params_M:     50.3
 depth:            8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+不同機器的絕對數字可能不同，但比較規則不變。最重要的是從 log 中穩定抽出核心訊號：
 
+```bash
+grep "^val_bpb:\|^peak_vram_mb:" run.log
 ```
-grep "^val_bpb:" run.log
-```
 
-## Logging results
+## 實驗紀錄
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+每次實驗完成後，都要寫入 `results.tsv`。這不是可有可無的附屬品，而是整個研究回圈的外部記憶。
 
-The TSV has a header row and 5 columns:
+格式必須是 **tab-separated**，不要用 comma，避免 description 被破壞。
 
-```
+Header：
+
+```text
 commit	val_bpb	memory_gb	status	description
 ```
 
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+欄位定義：
 
-Example:
+1. git commit hash，使用短版 7 碼
+2. `val_bpb`，例如 `1.234567`；若 crash 則記 `0.000000`
+3. peak memory（GB），由 `peak_vram_mb / 1024` 換算並四捨五入到 1 位小數；若 crash 則記 `0.0`
+4. `status`：只能是 `keep`、`discard` 或 `crash`
+5. `description`：一句簡短但具體的實驗說明
 
-```
+範例：
+
+```text
 commit	val_bpb	memory_gb	status	description
 a1b2c3d	0.997900	44.0	keep	baseline
 b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
@@ -87,28 +142,76 @@ c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
 d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 ```
 
-## The experiment loop
+注意：`results.tsv` 不要 commit，讓它保持 untracked。
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+## 實驗回圈
 
-LOOP FOREVER:
+實驗永遠在專用 branch 上進行，例如 `autoresearch/apr9` 或 `autoresearch/apr9-gpu0`。
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+進入回圈後，反覆執行以下流程：
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+1. 先看目前 git 狀態，確認你站在哪個 commit 上。
+2. 選一個清楚的實驗假設，直接修改 `train.py`。
+3. 建立 git commit，讓這次假設有明確邊界。
+4. 執行實驗：
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+```bash
+uv run train.py > run.log 2>&1
+```
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+5. 從 log 讀出結果：
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+```bash
+grep "^val_bpb:\|^peak_vram_mb:" run.log
+```
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+6. 若 grep 沒有輸出，視為 crash。此時讀取：
+
+```bash
+tail -n 50 run.log
+```
+
+7. 將結果記錄到 `results.tsv`。
+8. 若 `val_bpb` 改善，保留 commit，讓 branch 往前推進。
+9. 若結果持平或更差，丟棄這次實驗，回到起始狀態再做下一輪。
+
+這個回圈的核心不是「一直改」，而是「只讓通過驗證的改動存活」。
+
+## 失敗處理
+
+### Timeout
+
+單次實驗正常應該約 5 分鐘，加上少量 startup/eval overhead。若超過 10 分鐘，直接視為失敗，終止 run，記錄後丟棄。
+
+### Crash
+
+若是明顯的低級錯誤，例如 typo、少 import、shape 很容易修，先修一次再重跑。
+
+若 crash 反映的是想法本身不成立，例如顯著 OOM、訓練流程根本不穩、改動方向明顯錯誤，就不要戀戰。記成 `crash`，描述原因，然後換下一個假設。
+
+### 卡關
+
+如果連續幾輪都沒有改善，不要開始隨機亂試。先回頭整理：
+
+- 最近幾個 near-miss 在改什麼
+- 哪類改動穩定變差
+- 哪些方向雖然沒贏，但值得組合
+- 是否有太多耦合改動讓訊號變髒
+
+研究停滯時，最需要的是重新形成假設，而不是增加混亂。
+
+## 自主性要求
+
+一旦 setup 結束並進入實驗回圈，就不要停下來問人類「要不要繼續」。不要問「這是不是一個好停點」，也不要因為暫時沒有靈感就等待指示。
+
+預設情境是：人類可能去睡覺了，而你應該在他離開時持續跑研究。若每輪約 5 分鐘，理論上每小時可以完成約 12 次實驗，一晚可以累積約 100 次左右。人類醒來時，應該看到的是一串已完成、已記錄、已篩選過的實驗，而不是一個停在半路的 agent。
+
+如果一時沒有新點子，就做研究員會做的事：
+
+- 重讀 `README.md`
+- 重讀 `train.py`
+- 回顧最近結果
+- 組合先前接近成功的想法
+- 嘗試更大膽但仍可驗證的方向
+
+你的任務不是等待靈感，而是維持實驗密度。
