@@ -25,35 +25,34 @@
 
 在開始實驗前，先把研究場初始化好。和使用者協作完成以下事項：
 
-1. 決定一個 run tag。用日期為基礎提議，例如 `apr9`；分支名稱應為 `autoresearch/<tag>`，而且必須是新的。
+1. 決定一個 run tag。用日期為基礎提議，例如 `apr10`；分支名稱用 `autoresearch/<tag>`，而且必須是新的。
 2. 建立實驗分支。從目前主線切出 `git checkout -b autoresearch/<tag>`。
 3. 讀完 in-scope 檔案。這個 repo 很小，至少要完整理解：
    - `README.md`：整體研究設定與設計意圖。
-   - `prepare.py`：固定常數、資料準備、tokenizer、dataloader、evaluation。不可修改。
-   - `train.py`：唯一主要實驗面。你會反覆修改這個檔案。
+   - `prepare.py`：固定常數、資料準備、tokenizer、dataloader、evaluation。除非專案目標改變，否則不要動。
+   - `train.py`：主要實驗面。你會反覆修改這個檔案。
 4. 確認資料已存在。檢查 `~/.cache/autoresearch/` 是否有 data shards 與 tokenizer；如果沒有，請告知人類先執行 `uv run prepare.py`。
 5. 初始化 `results.tsv`。建立只有 header 的 TSV，基線結果在第一次 run 後補上。
-6. 確認研究場 ready。確認 branch、資料、檔案理解與紀錄檔都已就緒，再開始跑實驗。
+6. 先做一次「跑通驗證」。在不修改任何程式前，先跑一次 `uv run train.py`，確保能從頭到尾完成並輸出 `val_bpb`。若失敗，先把 `train.py` 的預設縮到可跑，再開始真正的研究迭代。
 
-一旦 setup 完成並獲得確認，就進入實驗模式，不要停留在準備階段。
+一旦 setup 完成並獲得確認，就進入實驗回圈，不要停留在準備階段。
 
 ## 固定規則
 
-每個實驗都在單張 GPU 上執行，指令是：
+每個實驗的啟動指令是：
 
 ```bash
 uv run train.py
 ```
 
-整個實驗制度有幾個不可動的固定點：
+這個 repo 允許在 `cuda`、`mps`、`cpu` 上跑。不同裝置的吞吐與最佳化路徑可能不同，但有幾個固定點不應該漂移：
 
 - 訓練時間預算固定為 **5 分鐘 wall clock**，不包含 startup/compilation。
 - 主要指標是 **`val_bpb`**，越低越好。
-- `prepare.py` 是固定實驗環境的一部分，不可修改。
-- `evaluate_bpb` 是唯一可信的評估標準，不可繞過、替換或重新定義。
+- 不要在一次實驗中同時改變太多「制度」級別設定，例如時間預算或評估定義。
 - 不可新增依賴或安裝新套件；只能用 `pyproject.toml` 已經存在的內容。
 
-可以動的只有研究變因，而不是實驗制度本身。
+可以動的是研究變因，不是讓結果不可比較的制度本身。
 
 ## 你可以做什麼
 
@@ -87,7 +86,7 @@ uv run train.py
 
 第一個 run 永遠是基線實驗。
 
-不要先做任何改動，直接執行原始 `train.py`，把它當成後續所有判斷的參考座標。
+不要先做任何改動，直接執行 `uv run train.py`，把它當成後續所有判斷的參考座標。如果基線 run 無法跑完（例如 OOM 或 `FAIL`），先把 `train.py` 的預設縮到可跑，再重新建立基線。
 
 ## 輸出判讀
 
@@ -111,6 +110,8 @@ depth:            8
 ```bash
 grep "^val_bpb:\|^peak_vram_mb:" run.log
 ```
+
+如果你看到輸出只有 `FAIL` 或沒有 `val_bpb`，代表這次 run 沒有完成有效的訓練與評估，應該視為失敗實驗。
 
 ## 實驗紀錄
 
@@ -165,7 +166,7 @@ uv run train.py > run.log 2>&1
 grep "^val_bpb:\|^peak_vram_mb:" run.log
 ```
 
-6. 若 grep 沒有輸出，視為 crash。此時讀取：
+6. 若 grep 沒有輸出或 `val_bpb` 缺失，視為失敗。此時讀取：
 
 ```bash
 tail -n 50 run.log
@@ -173,7 +174,7 @@ tail -n 50 run.log
 
 7. 將結果記錄到 `results.tsv`。
 8. 若 `val_bpb` 改善，保留 commit，讓 branch 往前推進。
-9. 若結果持平或更差，丟棄這次實驗，回到起始狀態再做下一輪。
+9. 若結果持平或更差，丟棄這次實驗，回到起始狀態再做下一輪。若你想維持線性最佳路徑，可以用 `git reset` 回退；若你不想丟棄 commit，也可以保留 commit 但在 `results.tsv` 標記為 `discard`，然後從上一次 `keep` 的 commit 再開新的實驗分支或移動 HEAD。
 
 這個回圈的核心不是「一直改」，而是「只讓通過驗證的改動存活」。
 
@@ -188,6 +189,8 @@ tail -n 50 run.log
 若是明顯的低級錯誤，例如 typo、少 import、shape 很容易修，先修一次再重跑。
 
 若 crash 反映的是想法本身不成立，例如顯著 OOM、訓練流程根本不穩、改動方向明顯錯誤，就不要戀戰。記成 `crash`，描述原因，然後換下一個假設。
+
+若你在 Apple Silicon 上遇到 `FAIL`（loss NaN 或爆掉），先把改動方向收斂到更保守的數值穩定性操作，例如降低 learning rate、關閉不必要的低精度、縮小 batch/模型，再重新建立基線與比較。
 
 ### 卡關
 

@@ -1,10 +1,15 @@
 # autoresearch
 
-![teaser](progress.png)
-
 這份 README 比較適合把它當成「學習導覽」來讀。
 
-如果你第一次接觸這個 repo，不用先把它想成一個要立刻跑起來的研究系統；更好的方式，是把它看成一份小型案例，學習一個 LLM 實驗專案可以怎麼被整理得夠小、夠清楚、夠容易比較。
+如果你第一次接觸這個 repo，不用先把它想成一個要立刻跑起來的研究系統；更好的方式，是把它看成一份小型案例，學習一個 LLM 實驗專案可以怎麼被整理得夠小、夠清楚、夠容易比較。現在這個 repo 也已經調整成可在 Apple Silicon 上執行學習版實驗，不再只限於 NVIDIA CUDA 環境。
+
+## Timeline
+
+- 2026-03：專案以最小化自動研究場的形式出現，核心想法是把 `train.py` 當成主要實驗面，讓 agent 在固定 5 分鐘預算內反覆提出、執行、比較並保留實驗。
+- 2026-04-09：README 與 `program.md` 被重寫成更偏學習導覽與研究 protocol 的版本，重點從專案宣言轉向「這個 repo 可以學到什麼」與「實驗流程怎麼被制度化」。
+- 2026-04-10：專案進一步調整為可在 Apple Silicon 上執行的學習版。依賴不再綁死 CUDA-only `torch`，`train.py` 與 `prepare.py` 加入 `cuda` / `mps` / `cpu` 裝置偵測與 fallback 路徑，並把 Apple Silicon 的預設模型、batch 與數值穩定性設定調得更保守。
+- 2026-04-10：同一天也補上了 `train.py` 輸出判讀說明，讓第一次看到 `val_bpb`、`training_seconds`、`total_seconds`、`peak_vram_mb` 等欄位時，可以直接把 log 當成學習材料來讀。
 
 ## 這份專案適合誰
 
@@ -138,15 +143,22 @@
 
 如果你想先把專案跑通，可以把這一段當成「建立學習環境」。
 
-**需求**：單張 NVIDIA GPU（目前在 H100 上測過）、Python 3.10+、[uv](https://docs.astral.sh/uv/)
+**需求**：Python 3.10、[uv](https://docs.astral.sh/uv/)，以及下面任一種裝置環境：
 
-這個 repo 用 [`.python-version`](/Users/test/research-autoresearch/.python-version) 指定 `Python 3.10`。如果你有安裝 `pyenv` 或相容工具，進入專案時通常會自動切到這個版本；沒有的話，也建議手動建立 Python 3.10 環境。
+- NVIDIA GPU：最快，也最接近原始設計目標
+- Apple Silicon（MPS）：可跑學習與小規模實驗
+- CPU：可作為閱讀與功能驗證用途，但速度最慢
+
+這個 repo 現在會根據裝置自動選擇 `cuda`、`mps` 或 `cpu`。在 NVIDIA GPU 上會優先使用原本的 CUDA 最佳化路徑；在 Apple Silicon 上則會自動退回到 PyTorch 內建 attention 與較保守的 optimizer / precision 設定。
+另外，Apple Silicon 與 CPU 也會自動使用更小的預設模型與 batch，目標是先讓整個實驗回圈能跑通，而不是硬追原始 H100 配置。
+
+這個 repo 用 [`.python-version`](/Users/test/research-autoresearch/.python-version) 指定 `Python 3.10`。如果你有安裝 `pyenv` 或相容工具，進入專案時通常會自動切到這個版本；如果沒有安裝 `pyenv`，可以直接跳過下面那兩行，改用你現有的 Python 3.10 環境即可。
 
 ```bash
 # 1. 安裝 uv（如果還沒有）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. 切到 Python 3.10（若你使用 pyenv）
+# 2. 切到 Python 3.10（只有安裝 pyenv 才需要）
 pyenv install 3.10 -s
 pyenv local 3.10
 
@@ -161,6 +173,106 @@ uv run train.py
 ```
 
 如果這五步都能成功完成，你就已經有足夠的環境去閱讀 `train.py` 的輸出、理解整個實驗回圈怎麼運作。
+
+如果你看到 `zsh: command not found: pyenv`，代表你的電腦沒有安裝 `pyenv`。這不是錯誤本身，只表示你不能用 `pyenv` 切版本；只要你已經有可用的 Python 3.10，直接從 `uv sync` 開始就可以。
+
+如果你是在 Apple Silicon 上執行，速度和可調參空間通常都不會和 NVIDIA GPU 相同。比較合理的期待是：
+
+1. 先把它跑通，理解整個實驗回圈
+2. 在較小模型與較小 batch 下做學習型實驗
+3. 若要追求原始 repo 的吞吐量，再換到 NVIDIA GPU
+
+## 如何讀 `train.py` 的輸出
+
+第一次看到 `uv run train.py` 的輸出時，很容易只盯著最後一行 `val_bpb`。其實這份 log 裡有三層資訊：
+
+1. **這次跑的是什麼模型**
+2. **這次訓練過程穩不穩、快不快**
+3. **這次實驗最後值不值得拿來比較**
+
+下面用一個 Apple Silicon 上成功跑完的例子來看：
+
+```text
+Vocab size: 8,192
+Model config: {'sequence_len': 2048, 'vocab_size': 8192, 'n_layer': 4, 'n_head': 2, 'n_kv_head': 2, 'n_embd': 128, 'window_pattern': 'L'}
+Parameter counts:
+  wte                     : 1,048,576
+  value_embeds            : 2,097,152
+  lm_head                 : 1,048,576
+  transformer_matrices    : 786,560
+  scalars                 : 8
+  total                   : 4,980,872
+Estimated FLOPs per token: 2.359373e+07
+Scaling AdamW LRs by 1/sqrt(128/768) = 1.000000
+Time budget: 300s
+Gradient accumulation steps: 2
+step 00364 (99.7%) | loss: 5.632492 | lrm: 0.01 | dt: 1085ms | tok/sec: 15,094 | mfu: 0.0% | epoch: 1 | remaining: 0s
+---
+val_bpb:          2.007002
+training_seconds: 300.1
+total_seconds:    783.5
+peak_vram_mb:     66.0
+mfu_percent:      0.00
+total_tokens_M:   6.0
+num_steps:        365
+num_params_M:     5.0
+depth:            4
+```
+
+這段輸出可以這樣理解：
+
+- `Vocab size: 8,192`
+  這代表 tokenizer 有 8192 個 token。這是目前實驗的離散化基礎，會影響 embedding 大小與輸出層大小。
+
+- `Model config: ...`
+  這是這次實驗實際建立出來的模型設定。從這份輸出可以直接讀到：序列長度是 `2048`、總層數是 `4`、embedding 維度是 `128`、attention pattern 是 `L`。如果你在調 `DEPTH`、`HEAD_DIM`、`WINDOW_PATTERN`，這一行就是第一個確認點。
+
+- `Parameter counts: ... total : 4,980,872`
+  這代表目前模型大約是 `5.0M` 參數。對 Apple Silicon 來說，這是一個偏學習用途的小模型設定，目標是先穩定跑完整個實驗回圈，而不是追求大模型吞吐。
+
+- `Estimated FLOPs per token: 2.359373e+07`
+  這是每個 token 大致需要多少運算量的估計值。它不是最終成績，但可以幫你理解這次模型大概有多重。
+
+- `Scaling AdamW LRs by 1/sqrt(128/768) = 1.000000`
+  這表示 learning rate 縮放係數最後被壓在 `1.0`。對目前的 Apple Silicon 路徑來說，這是一個刻意保守的設定，目的是避免小模型時 learning rate 被放太大，導致一開始就 `FAIL` 或數值爆掉。
+
+- `Time budget: 300s`
+  這是固定實驗制度的一部分：真正拿來比較的訓練時間是 `300` 秒，也就是 5 分鐘。
+
+- `Gradient accumulation steps: 2`
+  這代表一次 optimizer update 會累積 2 個 micro-batch。這通常是為了在較小裝置上維持總 batch 大小，同時控制單步記憶體壓力。
+
+- `step 00364 ... loss: 5.632492 ... tok/sec: 15,094`
+  這是訓練過程中的即時狀態列。
+  `loss` 是訓練中的交叉熵，主要用來看訓練有沒有爆掉。
+  `tok/sec` 是吞吐量，表示目前每秒大約處理多少 token。
+  在這個例子裡，Apple Silicon 大約是 `15k tok/sec`，這是一個「能跑通、可觀察」的學習型速度，不是用來追求極限效能的數字。
+
+- `val_bpb: 2.007002`
+  這是最重要的最終指標。`bpb` 是 bits per byte，越低越好。之後不同實驗之間最主要就是比較這個值。
+
+- `training_seconds: 300.1`
+  這表示真正計入制度的訓練時間約為 300 秒，符合設計預期。
+
+- `total_seconds: 783.5`
+  這表示整個程式從開始到結束總共花了約 783 秒。它比 `training_seconds` 大很多，代表除了訓練本身，Apple Silicon 上還有不少時間花在 setup、prefill、evaluation 與其他 overhead。對 Mac 來說，這是正常的，也提醒你 `training_seconds` 才是更重要的比較基準。
+
+- `peak_vram_mb: 66.0`
+  這是裝置記憶體峰值的近似觀察值。對目前 Apple Silicon 路徑來說，這個數字偏小，代表這份學習版配置是很保守的。
+
+- `mfu_percent: 0.00`
+  `MFU` 是 model FLOPs utilization。這個指標原本比較適合 CUDA/H100 類型的環境，在 Apple Silicon 路徑上目前沒有代表性，所以看到 `0.00` 是正常的。
+
+- `total_tokens_M: 6.0`
+  這表示這次 5 分鐘訓練總共處理了大約 `6.0M` token。
+
+- `num_steps: 365`
+  這是總共做了多少次 optimizer step。之後如果你調大 batch 或改變吞吐，這個數字也會跟著變。
+
+- `num_params_M: 5.0`、`depth: 4`
+  這兩個是最後的摘要資訊，方便你在記錄表裡快速知道這次實驗的模型規模。
+
+對這次輸出，一句話總結就是：**這是一個在 Apple Silicon 上成功跑完整個 5 分鐘訓練回圈的基線學習版實驗**。它的價值不在於 `2.007002` 這個數字本身有多強，而在於它提供了一個穩定、可重複、可比較的起點。之後你若要做實驗，應該拿它當 baseline 去比較，而不是拿它和 H100 上的大模型結果直接相比。
 
 ## 如果你要把它當教材來看
 
@@ -192,12 +304,13 @@ prepare.py      — 固定實驗環境：資料、tokenizer、evaluation、常�
 train.py        — 實驗主體：模型、optimizer、訓練流程
 program.md      — 研究 protocol：agent 的工作規則
 pyproject.toml  — 專案依賴
-uv.lock         — 依賴鎖定檔，確保環境可重現
 ```
+
+第一次在新機器上執行 `uv sync` 時，`uv` 會依照目前平台重新解析並建立對應的環境；像 Apple Silicon 和 NVIDIA GPU 這種平台差異較大的情況，這比強行共用同一份舊 lockfile 更安全。
 
 ## 如果你的硬體比較小
 
-這份程式碼目前是以單張 NVIDIA GPU 為主要前提。若你只是想把它當成學習材料，在較小機器上觀察概念，可以先考慮：
+這份程式碼雖然現在可以在 Apple Silicon 上跑，但原始設計仍然偏向單張 NVIDIA GPU。若你只是想把它當成學習材料，在較小機器上觀察概念，可以先考慮：
 
 1. 換成熵更低的資料集，例如 [TinyStories](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean)
 2. 降低 `vocab_size`
@@ -208,15 +321,6 @@ uv.lock         — 依賴鎖定檔，確保環境可重現
 7. 下修 `TOTAL_BATCH_SIZE`
 
 這些調整不只是為了「讓它能跑」，也很適合幫助你理解模型規模、資料分布、序列長度和評估成本之間的關係。
-
-## 延伸閱讀
-
-如果你想看別人怎麼把這個想法搬到其他平台，下面這些 fork 可以當成延伸材料：
-
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
 
 ## License
 
