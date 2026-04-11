@@ -1,12 +1,8 @@
-#!/usr/bin/env python
-# coding: utf-8
+"""
+Autoresearch Experiment Analysis
 
-# # Autoresearch Experiment Analysis
-# 
-# Analysis of autonomous hyperparameter tuning results from `results.tsv`.
-
-# In[ ]:
-
+Analysis of autonomous hyperparameter tuning results from `results.tsv`.
+"""
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,11 +16,8 @@ df["status"] = df["status"].str.strip().str.upper()
 
 print(f"Total experiments: {len(df)}")
 print(f"Columns: {list(df.columns)}")
-df.head(10)
-
-
-# In[ ]:
-
+print(df.head(10))
+print("\n" + "="*80 + "\n")
 
 counts = df["status"].value_counts()
 print("Experiment outcomes:")
@@ -36,10 +29,8 @@ n_crash = counts.get("CRASH", 0)
 n_decided = n_keep + n_discard
 if n_decided > 0:
     print(f"\nKeep rate: {n_keep}/{n_decided} = {n_keep / n_decided:.1%}")
-
-
-# In[ ]:
-
+    
+print("\n" + "="*80 + "\n")
 
 # Show all KEPT experiments (the improvements that stuck)
 kept = df[df["status"] == "KEEP"].copy()
@@ -48,14 +39,14 @@ for i, row in kept.iterrows():
     bpb = row["val_bpb"]
     desc = row["description"]
     print(f"  #{i:3d}  bpb={bpb:.6f}  mem={row['memory_gb']:.1f}GB  {desc}")
+    
+print("\n" + "="*80 + "\n")
 
-
-# ## Val BPB Over Time
-# 
-# Track how the best (kept) val_bpb evolves as experiments progress. The running minimum shows the "frontier" -- the best result achieved so far.
-
-# In[ ]:
-
+# ---------------------------------------------------------
+# Val BPB Over Time
+# Track how the best (kept) val_bpb evolves as experiments progress. 
+# The running minimum shows the "frontier" -- the best result achieved so far.
+# ---------------------------------------------------------
 
 fig, ax = plt.subplots(figsize=(16, 8))
 
@@ -116,11 +107,11 @@ plt.savefig("progress.png", dpi=150, bbox_inches="tight")
 plt.show()
 print("Saved to progress.png")
 
+print("\n" + "="*80 + "\n")
 
-# ## Summary Statistics
-
-# In[ ]:
-
+# ---------------------------------------------------------
+# Summary Statistics
+# ---------------------------------------------------------
 
 # Summary stats
 kept = df[df["status"] == "KEEP"].copy()
@@ -141,11 +132,11 @@ for i, (_, row) in enumerate(kept_sorted.iterrows()):
     desc = str(row["description"]).strip()
     print(f"  Experiment #{row['index']:3d}: bpb={row['val_bpb']:.6f}  {desc}")
 
-
-# ## Top Hits (Kept Experiments by Improvement)
-
-# In[ ]:
-
+print("\n" + "="*80 + "\n")
+    
+# ---------------------------------------------------------
+# Top Hits (Kept Experiments by Improvement)
+# ---------------------------------------------------------
 
 # Each kept experiment's delta is measured vs the previous kept experiment's bpb
 # (since experiments are cumulative -- each one builds on the last kept state)
@@ -165,10 +156,3 @@ for rank, (_, row) in enumerate(hits.iterrows(), 1):
     print(f"{rank:4d}  {row['delta']:+.6f}  {row['val_bpb']:.6f}  {row['description']}")
 
 print(f"\n{'':>4}  {hits['delta'].sum():+.6f}  {'':>10}  TOTAL improvement over baseline")
-
-
-# In[ ]:
-
-
-
-
