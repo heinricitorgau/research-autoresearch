@@ -163,6 +163,9 @@ class CausalSelfAttention(nn.Module):
         v = v.permute(0, 2, 1, 3)
         # On non-CUDA backends, allocating an explicit T x T local-window mask is
         # often more expensive than the attention itself. Prefer plain causal SDPA.
+        # NOTE: window_size is intentionally ignored here — WINDOW_PATTERN has no
+        # effect on MPS/CPU. Results on non-CUDA hardware are not comparable to
+        # CUDA runs that use flash-attn3 with true sliding-window attention.
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return y.permute(0, 2, 1, 3)
 
@@ -550,6 +553,13 @@ torch.set_float32_matmul_precision("high")
 device = torch.device(DEVICE_TYPE)
 autocast_ctx = get_autocast_context()
 
+if DEVICE_TYPE != "cuda":
+    print(
+        f"[WARNING] Running on {DEVICE_TYPE.upper()}. WINDOW_PATTERN ('{WINDOW_PATTERN}') "
+        "is ignored — non-CUDA SDPA uses plain causal attention. "
+        "Results are NOT comparable to CUDA reference runs."
+    )
+
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
@@ -581,7 +591,11 @@ num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
-assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
+assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0, (
+    f"TOTAL_BATCH_SIZE ({TOTAL_BATCH_SIZE}) must be divisible by "
+    f"DEVICE_BATCH_SIZE * MAX_SEQ_LEN ({DEVICE_BATCH_SIZE} * {MAX_SEQ_LEN} = {tokens_per_fwdbwd}). "
+    f"Adjust DEVICE_BATCH_SIZE or TOTAL_BATCH_SIZE."
+)
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
 optimizer = model.setup_optimizer(
@@ -655,9 +669,11 @@ while True:
 
     train_loss_f = train_loss.item()
 
-    # Fast fail: abort if loss is exploding or NaN
-    if math.isnan(train_loss_f) or train_loss_f > 100:
-        print("FAIL")
+    # Fast fail: abort if loss is exploding or NaN.
+    # Random-init loss for vocab_size=8192 is ~9.01 nats (ln(8192)).
+    # Threshold of 20 catches genuine divergence while allowing early high-loss steps.
+    if math.isnan(train_loss_f) or train_loss_f > 20:
+        print(f"FAIL (loss={train_loss_f:.4f})")
         exit(1)
 
     device_sync()

@@ -8,8 +8,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
+import os
+import sys
+
+TSV_PATH = "results.tsv"
+if not os.path.exists(TSV_PATH):
+    print(f"[ERROR] '{TSV_PATH}' not found. Run at least one experiment first.")
+    print("Expected columns: commit, val_bpb, memory_gb, status, description")
+    sys.exit(1)
+
 # Load the TSV (tab-separated, 5 columns: commit, val_bpb, memory_gb, status, description)
-df = pd.read_csv("results.tsv", sep="\t")
+df = pd.read_csv(TSV_PATH, sep="\t")
 df["val_bpb"] = pd.to_numeric(df["val_bpb"], errors="coerce")
 df["memory_gb"] = pd.to_numeric(df["memory_gb"], errors="coerce")
 df["status"] = df["status"].str.strip().str.upper()
@@ -98,9 +107,12 @@ ax.legend(loc="upper right", fontsize=9)
 ax.grid(True, alpha=0.2)
 
 # Y-axis: from just below best to just above baseline
-best_bpb = kept_bpb.min()
-margin = (baseline_bpb - best_bpb) * 0.15
-ax.set_ylim(best_bpb - margin, baseline_bpb + margin)
+if len(kept_bpb) > 0:
+    best_bpb = kept_bpb.min()
+    margin = (baseline_bpb - best_bpb) * 0.15 if baseline_bpb != best_bpb else 0.01
+    ax.set_ylim(best_bpb - margin, baseline_bpb + margin)
+else:
+    ax.set_ylim(baseline_bpb - 0.05, baseline_bpb + 0.05)
 
 plt.tight_layout()
 plt.savefig("progress.png", dpi=150, bbox_inches="tight")
@@ -116,13 +128,17 @@ print("\n" + "="*80 + "\n")
 # Summary stats
 kept = df[df["status"] == "KEEP"].copy()
 baseline_bpb = df.iloc[0]["val_bpb"]
-best_bpb = kept["val_bpb"].min()
-best_row = kept.loc[kept["val_bpb"].idxmin()]
 
-print(f"Baseline val_bpb:  {baseline_bpb:.6f}")
-print(f"Best val_bpb:      {best_bpb:.6f}")
-print(f"Total improvement: {baseline_bpb - best_bpb:.6f} ({(baseline_bpb - best_bpb) / baseline_bpb * 100:.2f}%)")
-print(f"Best experiment:   {best_row['description']}")
+if kept.empty:
+    print(f"Baseline val_bpb:  {baseline_bpb:.6f}")
+    print("No KEEP experiments yet — no improvement to report.")
+else:
+    best_bpb = kept["val_bpb"].min()
+    best_row = kept.loc[kept["val_bpb"].idxmin()]
+    print(f"Baseline val_bpb:  {baseline_bpb:.6f}")
+    print(f"Best val_bpb:      {best_bpb:.6f}")
+    print(f"Total improvement: {baseline_bpb - best_bpb:.6f} ({(baseline_bpb - best_bpb) / baseline_bpb * 100:.2f}%)")
+    print(f"Best experiment:   {best_row['description']}")
 print()
 
 # How many experiments to find each improvement
@@ -141,18 +157,22 @@ print("\n" + "="*80 + "\n")
 # Each kept experiment's delta is measured vs the previous kept experiment's bpb
 # (since experiments are cumulative -- each one builds on the last kept state)
 kept = df[df["status"] == "KEEP"].copy()
-kept["prev_bpb"] = kept["val_bpb"].shift(1)
-kept["delta"] = kept["prev_bpb"] - kept["val_bpb"]
 
-# Drop baseline (no delta)
-hits = kept.iloc[1:].copy()
+if len(kept) < 2:
+    print("Not enough KEEP experiments for delta analysis (need at least 2).")
+else:
+    kept["prev_bpb"] = kept["val_bpb"].shift(1)
+    kept["delta"] = kept["prev_bpb"] - kept["val_bpb"]
 
-# Sort by delta improvement (biggest first)
-hits = hits.sort_values("delta", ascending=False)
+    # Drop baseline (no delta)
+    hits = kept.iloc[1:].copy()
 
-print(f"{'Rank':>4}  {'Delta':>8}  {'BPB':>10}  Description")
-print("-" * 80)
-for rank, (_, row) in enumerate(hits.iterrows(), 1):
-    print(f"{rank:4d}  {row['delta']:+.6f}  {row['val_bpb']:.6f}  {row['description']}")
+    # Sort by delta improvement (biggest first)
+    hits = hits.sort_values("delta", ascending=False)
 
-print(f"\n{'':>4}  {hits['delta'].sum():+.6f}  {'':>10}  TOTAL improvement over baseline")
+    print(f"{'Rank':>4}  {'Delta':>8}  {'BPB':>10}  Description")
+    print("-" * 80)
+    for rank, (_, row) in enumerate(hits.iterrows(), 1):
+        print(f"{rank:4d}  {row['delta']:+.6f}  {row['val_bpb']:.6f}  {row['description']}")
+
+    print(f"\n{'':>4}  {hits['delta'].sum():+.6f}  {'':>10}  TOTAL improvement over baseline")
