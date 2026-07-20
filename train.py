@@ -8,6 +8,17 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+# Windows: triton-windows bundles a minimal CUDA toolchain (ptxas, cuda.h, cuda.lib)
+# but only discovers it through CUDA_PATH, and the lookup result is cached at first
+# use — so this must run before torch/triton are imported.
+if os.name == "nt" and "CUDA_PATH" not in os.environ:
+    import importlib.util
+    _triton_spec = importlib.util.find_spec("triton")
+    if _triton_spec is not None and _triton_spec.origin:
+        _bundled_cuda = os.path.join(os.path.dirname(_triton_spec.origin), "backends", "nvidia")
+        if os.path.exists(os.path.join(_bundled_cuda, "bin", "ptxas.exe")):
+            os.environ["CUDA_PATH"] = _bundled_cuda
+
 import gc
 import math
 import time
@@ -22,9 +33,28 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, default_device, make_da
 
 
 DEVICE_TYPE = default_device()
-USE_TORCH_COMPILE = DEVICE_TYPE == "cuda"
 MODEL_DTYPE = torch.bfloat16 if DEVICE_TYPE == "cuda" else torch.float32
 H100_BF16_PEAK_FLOPS = 989.5e12
+
+CUDA_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 2**30 if DEVICE_TYPE == "cuda" else 0.0
+CUDA_TIER = "large" if CUDA_VRAM_GB >= 40 else ("medium" if CUDA_VRAM_GB >= 16 else "small")
+
+
+def probe_torch_compile():
+    """torch.compile needs a working Triton toolchain (missing on many Windows setups).
+    Probe with a tiny kernel so a broken toolchain degrades to eager instead of crashing."""
+    if DEVICE_TYPE != "cuda":
+        return False
+    try:
+        fn = torch.compile(lambda t: t * 2 + 1, dynamic=False)
+        fn(torch.ones(8, device="cuda"))
+        return True
+    except Exception as exc:
+        print(f"[WARNING] torch.compile unavailable ({type(exc).__name__}); falling back to eager execution.")
+        return False
+
+
+USE_TORCH_COMPILE = probe_torch_compile()
 
 
 def maybe_compile(fn):
@@ -52,6 +82,43 @@ def select_flash_attention():
 
 fa3 = select_flash_attention()
 
+# FlexAttention: true sliding-window attention for CUDA devices without flash-attn3
+# (e.g. consumer GPUs — FA3 targets Hopper). Needs torch.compile to be fast.
+flex_attention_fn = None
+create_block_mask = None
+if fa3 is None and DEVICE_TYPE == "cuda" and USE_TORCH_COMPILE:
+    try:
+        from torch.nn.attention.flex_attention import flex_attention as _flex_attention
+        from torch.nn.attention.flex_attention import create_block_mask
+        flex_attention_fn = torch.compile(_flex_attention, dynamic=False)
+    except Exception as exc:
+        print(f"FlexAttention unavailable, falling back to PyTorch SDPA: {exc}")
+
+# Per-window BlockMasks for FlexAttention, keyed by window size. Built once after
+# the model config is known (see build_flex_masks below).
+FLEX_MASKS = None
+
+ATTENTION_BACKEND = ("flash-attn3" if fa3 is not None else
+                     "flex-attention" if flex_attention_fn is not None else
+                     "sdpa")
+print(f"Attention backend: {ATTENTION_BACKEND}")
+
+
+def build_flex_masks(window_sizes, seq_len):
+    """One BlockMask per distinct window size. Matches FA3 semantics:
+    window (w, 0) attends to kv positions with 0 <= q_idx - kv_idx <= w."""
+    masks = {}
+    for window, _ in set(window_sizes):
+        if window >= seq_len:
+            def mask_mod(b, h, q_idx, kv_idx):
+                return q_idx >= kv_idx
+        else:
+            def mask_mod(b, h, q_idx, kv_idx, w=window):
+                return (q_idx >= kv_idx) & (q_idx - kv_idx <= w)
+        masks[window] = create_block_mask(mask_mod, B=None, H=None,
+                                          Q_LEN=seq_len, KV_LEN=seq_len, device=DEVICE_TYPE)
+    return masks
+
 
 def device_sync():
     if DEVICE_TYPE == "cuda":
@@ -77,8 +144,15 @@ def get_peak_memory_mb():
     return 0.0
 
 
-def device_default(value_cuda, value_mps, value_cpu):
+def device_default(value_cuda, value_mps, value_cpu, cuda_medium=None, cuda_small=None):
+    """Per-device default. value_cuda targets large GPUs (H100 class, >=40GB).
+    cuda_medium (>=16GB) and cuda_small (<16GB, e.g. RTX 4060 8GB) override it
+    for smaller CUDA cards; when omitted, value_cuda is used for every tier."""
     if DEVICE_TYPE == "cuda":
+        if CUDA_TIER == "small" and cuda_small is not None:
+            return cuda_small
+        if CUDA_TIER == "medium" and cuda_medium is not None:
+            return cuda_medium
         return value_cuda
     if DEVICE_TYPE == "mps":
         return value_mps
@@ -151,21 +225,35 @@ class CausalSelfAttention(nn.Module):
 
         if fa3 is not None:
             y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        elif FLEX_MASKS is not None:
+            y = self._flex_attention(q, k, v, window_size)
         else:
             y = self._scaled_dot_product_attention(q, k, v, window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
+    def _flex_attention(self, q, k, v, window_size):
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        y = flex_attention_fn(q, k, v, block_mask=FLEX_MASKS[window_size[0]],
+                              enable_gqa=self.n_kv_head != self.n_head)
+        return y.permute(0, 2, 1, 3)
+
     def _scaled_dot_product_attention(self, q, k, v, window_size):
         q = q.permute(0, 2, 1, 3)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
+        if self.n_kv_head != self.n_head:
+            rep = self.n_head // self.n_kv_head
+            k = k.repeat_interleave(rep, dim=1)
+            v = v.repeat_interleave(rep, dim=1)
         # On non-CUDA backends, allocating an explicit T x T local-window mask is
         # often more expensive than the attention itself. Prefer plain causal SDPA.
         # NOTE: window_size is intentionally ignored here — WINDOW_PATTERN has no
-        # effect on MPS/CPU. Results on non-CUDA hardware are not comparable to
-        # CUDA runs that use flash-attn3 with true sliding-window attention.
+        # effect on this path. Results are not comparable to runs with true
+        # sliding-window attention (flash-attn3 or FlexAttention).
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return y.permute(0, 2, 1, 3)
 
@@ -395,14 +483,16 @@ polar_express_coeffs = [
 
 @maybe_compile
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+    # lerp_ with a float32 0-d weight rejects bf16 tensors on torch<=2.6;
+    # the mul_/add_ form is dtype-agnostic and fuses identically under compile.
     p.mul_(1 - lr_t * wd_t)
-    exp_avg.lerp_(grad, 1 - beta1_t)
-    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
+    exp_avg.mul_(beta1_t).add_(grad * (1 - beta1_t))
+    exp_avg_sq.mul_(beta2_t).add_(grad.square() * (1 - beta2_t))
     bias1 = 1 - beta1_t ** step_t
     bias2 = 1 - beta2_t ** step_t
     denom = (exp_avg_sq / bias2).sqrt() + eps_t
     step_size = lr_t / bias1
-    p.add_(exp_avg / denom, alpha=-step_size)
+    p.add_(-step_size * (exp_avg / denom))
 
 @maybe_compile
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
@@ -426,12 +516,14 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
             X = a * X + B @ X
     g = X
     # NorMuon variance reduction
-    beta2 = beta2_t.to(g.dtype)
     v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
     red_dim_size = g.size(red_dim)
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
     v_norm = v_norm_sq.sqrt()
-    second_momentum_buffer.lerp_(v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2)
+    # mul_/add_ instead of lerp_: torch<=2.6 requires the lerp_ weight dtype to
+    # match the buffer exactly; this form is dtype-agnostic and fuses the same.
+    second_momentum_buffer.mul_(beta2_t).add_(
+        v_mean.to(dtype=second_momentum_buffer.dtype) * (1 - beta2_t))
     step_size = second_momentum_buffer.clamp_min(1e-10).rsqrt()
     scaled_sq_sum = (v_mean * red_dim_size) * step_size.float().square()
     v_norm_new = scaled_sq_sum.sum(dim=(-2, -1), keepdim=True).sqrt()
@@ -522,11 +614,12 @@ class MuonAdamW(torch.optim.Optimizer):
 
 # Model architecture
 ASPECT_RATIO = device_default(64, 32, 32)       # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = device_default(128, 64, 64)          # target head dimension for attention
+HEAD_DIM = device_default(128, 64, 64, cuda_medium=64, cuda_small=64)  # 128 needs H100-class smem; FlexAttention bwd on consumer GPUs (sm86/89) requires <=64
 WINDOW_PATTERN = device_default("SSSL", "L", "L") # simpler fallback on non-CUDA devices
+GQA_RATIO = 1                                   # n_head / n_kv_head; 1 = no GQA (must divide n_head)
 
 # Optimization
-TOTAL_BATCH_SIZE = device_default(2**19, 2**14, 2**13) # smaller on memory-constrained devices
+TOTAL_BATCH_SIZE = device_default(2**19, 2**14, 2**13, cuda_medium=2**18, cuda_small=2**17) # smaller on memory-constrained devices
 EMBEDDING_LR = device_default(0.6, 0.08, 0.05)      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = device_default(0.004, 0.001, 0.001)  # learning rate for lm_head (Adam)
 MATRIX_LR = device_default(0.04, 0.005, 0.005)        # learning rate for matrix parameters (Muon)
@@ -539,7 +632,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
 DEPTH = device_default(8, 4, 4)               # number of transformer layers
-DEVICE_BATCH_SIZE = device_default(128, 4, 2)  # per-device batch size (reduce if OOM)
+DEVICE_BATCH_SIZE = device_default(128, 4, 2, cuda_medium=32, cuda_small=16)  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -553,11 +646,13 @@ torch.set_float32_matmul_precision("high")
 device = torch.device(DEVICE_TYPE)
 autocast_ctx = get_autocast_context()
 
-if DEVICE_TYPE != "cuda":
+if DEVICE_TYPE == "cuda":
+    print(f"CUDA device: {torch.cuda.get_device_name(0)} ({CUDA_VRAM_GB:.1f} GB, tier={CUDA_TIER})")
+if ATTENTION_BACKEND == "sdpa" and any(c == "S" for c in WINDOW_PATTERN.upper()):
     print(
-        f"[WARNING] Running on {DEVICE_TYPE.upper()}. WINDOW_PATTERN ('{WINDOW_PATTERN}') "
-        "is ignored — non-CUDA SDPA uses plain causal attention. "
-        "Results are NOT comparable to CUDA reference runs."
+        f"[WARNING] Attention backend is plain SDPA. WINDOW_PATTERN ('{WINDOW_PATTERN}') "
+        "is ignored — sliding windows need flash-attn3 or FlexAttention. "
+        "Results are NOT comparable to runs with true sliding-window attention."
     )
 
 tokenizer = Tokenizer.from_directory()
@@ -568,9 +663,12 @@ def build_model_config(depth):
     base_dim = depth * ASPECT_RATIO
     model_dim = ((base_dim + HEAD_DIM - 1) // HEAD_DIM) * HEAD_DIM
     num_heads = model_dim // HEAD_DIM
+    assert num_heads % GQA_RATIO == 0, (
+        f"GQA_RATIO ({GQA_RATIO}) must divide n_head ({num_heads})."
+    )
     return GPTConfig(
         sequence_len=MAX_SEQ_LEN, vocab_size=vocab_size,
-        n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
+        n_layer=depth, n_head=num_heads, n_kv_head=num_heads // GQA_RATIO, n_embd=model_dim,
         window_pattern=WINDOW_PATTERN,
     )
 
@@ -581,6 +679,9 @@ with torch.device("meta"):
     model = GPT(config)
 model.to_empty(device=device)
 model.init_weights()
+
+if flex_attention_fn is not None:
+    FLEX_MASKS = build_flex_masks(model.window_sizes, MAX_SEQ_LEN)
 
 param_counts = model.num_scaling_params()
 print("Parameter counts:")
