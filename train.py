@@ -638,10 +638,12 @@ DEVICE_BATCH_SIZE = device_default(128, 4, 2, cuda_medium=32, cuda_small=16)  # 
 # Setup: tokenizer, model, optimizer, dataloader
 # ---------------------------------------------------------------------------
 
+SEED = int(os.environ.get("AUTORESEARCH_SEED", "42"))  # override for noise-floor measurement
+
 t_start = time.time()
-torch.manual_seed(42)
+torch.manual_seed(SEED)
 if DEVICE_TYPE == "cuda":
-    torch.cuda.manual_seed(42)
+    torch.cuda.manual_seed(SEED)
 torch.set_float32_matmul_precision("high")
 device = torch.device(DEVICE_TYPE)
 autocast_ctx = get_autocast_context()
