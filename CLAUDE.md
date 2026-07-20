@@ -15,7 +15,8 @@ python train.py        # 系統 Python 3.12 + torch 2.6 cu124,不用 uv
 ```
 
 - 一次 run 約 9–11 分鐘:啟動 ~1 分、torch.compile ~2 分、訓練 5 分、eval ~2 分(eval 無進度輸出是正常的)
-- 正常值參考:val_bpb ≈ 1.38–1.40、peak_vram_mb ≈ 6160、tok/sec ≈ 60–67k、attention backend 應顯示 `flex-attention`
+- 正常值參考(GQA_RATIO=2 預設,2026-07-20 起):val_bpb ≈ 1.36–1.44(跨 seed)、peak_vram_mb ≈ 5616、tok/sec ≈ 68–70k、attention backend 應顯示 `flex-attention`
+- 若 run 異常慢(>15 分未進 eval),先查 `nvidia-smi`:peak VRAM 超過 ~8GB 時 Windows 驅動會外溢到系統 RAM,吞吐掉 3–4 倍而不報 OOM
 - 其他平台(uv、Apple Silicon)見 `README.md`
 
 ## 比較規則(補充 program.md)
