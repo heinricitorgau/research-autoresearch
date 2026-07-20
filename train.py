@@ -683,7 +683,8 @@ print()  # newline after \r training log
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
-# Final eval
+# Final eval (silent while it runs; includes a torch.compile re-trace for eval mode)
+print("Evaluating val_bpb (no progress output; takes a few minutes on small GPUs)...")
 model.eval()
 with autocast_ctx:
     val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE, device=DEVICE_TYPE)
