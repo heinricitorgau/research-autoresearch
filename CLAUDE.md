@@ -21,4 +21,5 @@ python train.py        # 系統 Python 3.12 + torch 2.6 cu124,不用 uv
 ## 比較規則(補充 program.md)
 
 - seed 固定用預設 42;`AUTORESEARCH_SEED` 環境變數只用於噪音量測
-- 同 seed 的 run-to-run 噪音實測約 ±0.017 bpb(時間制預算下步數會浮動)。小於噪音水位的 val_bpb 差異不構成 keep 的理由;最新量測值記錄在 `results.tsv` 開頭幾列
+- 噪音實測(2026-07-20,4 runs,詳見 `results.tsv` 開頭幾列):同 seed 重跑差 0.017 bpb;跨 seed(42/43/44)全距 0.067、std ≈ 0.029
+- keep 門檻:純超參數/optimizer 改動(不動模型形狀)須改善 > 0.02;**改動架構會重抽初始化**,等同承受跨 seed 噪音,單次 run 須改善 > 0.05,或對有希望的候選重跑 2–3 次比平均
