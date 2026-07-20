@@ -486,7 +486,7 @@ class MuonAdamW(torch.optim.Optimizer):
 ASPECT_RATIO = device_default(64, 32, 32)       # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = device_default(128, 64, 64, cuda_medium=64, cuda_small=64)  # 128 needs H100-class smem; FlexAttention bwd on consumer GPUs (sm86/89) requires <=64
 WINDOW_PATTERN = device_default("SSSL", "L", "L") # simpler fallback on non-CUDA devices
-GQA_RATIO = 1                                   # n_head / n_kv_head; 1 = no GQA (must divide n_head)
+GQA_RATIO = 2                                   # exp6: halve kv heads; VE params halve too (memory win if bpb holds)
 
 # Optimization
 TOTAL_BATCH_SIZE = device_default(2**19, 2**14, 2**13, cuda_medium=2**18, cuda_small=2**17) # smaller on memory-constrained devices
