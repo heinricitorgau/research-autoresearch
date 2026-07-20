@@ -1,162 +1,32 @@
 """
-Autoresearch pretraining script. Single-GPU, single-file.
+Autoresearch pretraining script. Single-GPU.
 Cherry-picked and simplified from nanochat.
 Usage: uv run train.py
+
+This file is the experiment surface: model, optimizer, hyperparameters, and the
+training loop. Fixed infrastructure lives elsewhere and is not part of the
+experiment: prepare.py (data / tokenizer / evaluation) and runtime.py (device
+detection, attention backends, platform bootstrap).
 """
 
-import os
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-
-# Windows: triton-windows bundles a minimal CUDA toolchain (ptxas, cuda.h, cuda.lib)
-# but only discovers it through CUDA_PATH, and the lookup result is cached at first
-# use — so this must run before torch/triton are imported.
-if os.name == "nt" and "CUDA_PATH" not in os.environ:
-    import importlib.util
-    _triton_spec = importlib.util.find_spec("triton")
-    if _triton_spec is not None and _triton_spec.origin:
-        _bundled_cuda = os.path.join(os.path.dirname(_triton_spec.origin), "backends", "nvidia")
-        if os.path.exists(os.path.join(_bundled_cuda, "bin", "ptxas.exe")):
-            os.environ["CUDA_PATH"] = _bundled_cuda
+import runtime  # must be imported before torch: sets env vars + CUDA toolchain paths
 
 import gc
 import math
+import os
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, default_device, make_dataloader, evaluate_bpb
-
-
-DEVICE_TYPE = default_device()
-MODEL_DTYPE = torch.bfloat16 if DEVICE_TYPE == "cuda" else torch.float32
-H100_BF16_PEAK_FLOPS = 989.5e12
-
-CUDA_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 2**30 if DEVICE_TYPE == "cuda" else 0.0
-CUDA_TIER = "large" if CUDA_VRAM_GB >= 40 else ("medium" if CUDA_VRAM_GB >= 16 else "small")
-
-
-def probe_torch_compile():
-    """torch.compile needs a working Triton toolchain (missing on many Windows setups).
-    Probe with a tiny kernel so a broken toolchain degrades to eager instead of crashing."""
-    if DEVICE_TYPE != "cuda":
-        return False
-    try:
-        fn = torch.compile(lambda t: t * 2 + 1, dynamic=False)
-        fn(torch.ones(8, device="cuda"))
-        return True
-    except Exception as exc:
-        print(f"[WARNING] torch.compile unavailable ({type(exc).__name__}); falling back to eager execution.")
-        return False
-
-
-USE_TORCH_COMPILE = probe_torch_compile()
-
-
-def maybe_compile(fn):
-    if USE_TORCH_COMPILE:
-        return torch.compile(fn, dynamic=False, fullgraph=True)
-    return fn
-
-
-def supports_flash_attention():
-    return DEVICE_TYPE == "cuda"
-
-
-def select_flash_attention():
-    if not supports_flash_attention():
-        return None
-    try:
-        from kernels import get_kernel
-        cap = torch.cuda.get_device_capability()
-        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-        return get_kernel(repo).flash_attn_interface
-    except Exception as exc:
-        print(f"Flash attention unavailable, falling back to PyTorch SDPA: {exc}")
-        return None
-
-
-fa3 = select_flash_attention()
-
-# FlexAttention: true sliding-window attention for CUDA devices without flash-attn3
-# (e.g. consumer GPUs — FA3 targets Hopper). Needs torch.compile to be fast.
-flex_attention_fn = None
-create_block_mask = None
-if fa3 is None and DEVICE_TYPE == "cuda" and USE_TORCH_COMPILE:
-    try:
-        from torch.nn.attention.flex_attention import flex_attention as _flex_attention
-        from torch.nn.attention.flex_attention import create_block_mask
-        flex_attention_fn = torch.compile(_flex_attention, dynamic=False)
-    except Exception as exc:
-        print(f"FlexAttention unavailable, falling back to PyTorch SDPA: {exc}")
-
-# Per-window BlockMasks for FlexAttention, keyed by window size. Built once after
-# the model config is known (see build_flex_masks below).
-FLEX_MASKS = None
-
-ATTENTION_BACKEND = ("flash-attn3" if fa3 is not None else
-                     "flex-attention" if flex_attention_fn is not None else
-                     "sdpa")
-print(f"Attention backend: {ATTENTION_BACKEND}")
-
-
-def build_flex_masks(window_sizes, seq_len):
-    """One BlockMask per distinct window size. Matches FA3 semantics:
-    window (w, 0) attends to kv positions with 0 <= q_idx - kv_idx <= w."""
-    masks = {}
-    for window, _ in set(window_sizes):
-        if window >= seq_len:
-            def mask_mod(b, h, q_idx, kv_idx):
-                return q_idx >= kv_idx
-        else:
-            def mask_mod(b, h, q_idx, kv_idx, w=window):
-                return (q_idx >= kv_idx) & (q_idx - kv_idx <= w)
-        masks[window] = create_block_mask(mask_mod, B=None, H=None,
-                                          Q_LEN=seq_len, KV_LEN=seq_len, device=DEVICE_TYPE)
-    return masks
-
-
-def device_sync():
-    if DEVICE_TYPE == "cuda":
-        torch.cuda.synchronize()
-    elif DEVICE_TYPE == "mps" and hasattr(torch, "mps"):
-        torch.mps.synchronize()
-
-
-def get_autocast_context():
-    if DEVICE_TYPE == "cuda":
-        return torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-    return nullcontext()
-
-
-def get_peak_memory_mb():
-    if DEVICE_TYPE == "cuda":
-        return torch.cuda.max_memory_allocated() / 1024 / 1024
-    if DEVICE_TYPE == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "current_allocated_memory"):
-        try:
-            return torch.mps.current_allocated_memory() / 1024 / 1024
-        except RuntimeError:
-            return 0.0
-    return 0.0
-
-
-def device_default(value_cuda, value_mps, value_cpu, cuda_medium=None, cuda_small=None):
-    """Per-device default. value_cuda targets large GPUs (H100 class, >=40GB).
-    cuda_medium (>=16GB) and cuda_small (<16GB, e.g. RTX 4060 8GB) override it
-    for smaller CUDA cards; when omitted, value_cuda is used for every tier."""
-    if DEVICE_TYPE == "cuda":
-        if CUDA_TIER == "small" and cuda_small is not None:
-            return cuda_small
-        if CUDA_TIER == "medium" and cuda_medium is not None:
-            return cuda_medium
-        return value_cuda
-    if DEVICE_TYPE == "mps":
-        return value_mps
-    return value_cpu
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+from runtime import (
+    ATTENTION_BACKEND, DEVICE_TYPE, FLEX_MASKS, H100_BF16_PEAK_FLOPS, MODEL_DTYPE,
+    USE_TORCH_COMPILE, device_default, device_sync, fa3, flex_attention_fn,
+    get_autocast_context, get_peak_memory_mb, maybe_compile,
+)
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -225,7 +95,7 @@ class CausalSelfAttention(nn.Module):
 
         if fa3 is not None:
             y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        elif FLEX_MASKS is not None:
+        elif flex_attention_fn is not None:
             y = self._flex_attention(q, k, v, window_size)
         else:
             y = self._scaled_dot_product_attention(q, k, v, window_size)
@@ -648,8 +518,7 @@ torch.set_float32_matmul_precision("high")
 device = torch.device(DEVICE_TYPE)
 autocast_ctx = get_autocast_context()
 
-if DEVICE_TYPE == "cuda":
-    print(f"CUDA device: {torch.cuda.get_device_name(0)} ({CUDA_VRAM_GB:.1f} GB, tier={CUDA_TIER})")
+runtime.print_runtime_banner()
 if ATTENTION_BACKEND == "sdpa" and any(c == "S" for c in WINDOW_PATTERN.upper()):
     print(
         f"[WARNING] Attention backend is plain SDPA. WINDOW_PATTERN ('{WINDOW_PATTERN}') "
@@ -682,8 +551,7 @@ with torch.device("meta"):
 model.to_empty(device=device)
 model.init_weights()
 
-if flex_attention_fn is not None:
-    FLEX_MASKS = build_flex_masks(model.window_sizes, MAX_SEQ_LEN)
+runtime.init_flex_masks(model.window_sizes, MAX_SEQ_LEN)
 
 param_counts = model.num_scaling_params()
 print("Parameter counts:")

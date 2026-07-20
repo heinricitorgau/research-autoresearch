@@ -4,7 +4,8 @@
 
 這個 repo 的研究模型很簡單：
 
-- `prepare.py` 定義固定實驗環境。
+- `prepare.py` 定義固定實驗環境（資料、tokenizer、evaluation）。
+- `runtime.py` 定義固定平台層（裝置偵測、attention 後端、compile、VRAM 分級）。
 - `train.py` 承載幾乎所有可變的實驗想法。
 - 你負責把 `train.py` 變成一串可比較的實驗序列，而不是一堆無法回溯的改動。
 
@@ -30,6 +31,7 @@
 3. 讀完 in-scope 檔案。這個 repo 很小，至少要完整理解：
    - `README.md`：整體研究設定與設計意圖。
    - `prepare.py`：固定常數、資料準備、tokenizer、dataloader、evaluation。除非專案目標改變，否則不要動。
+   - `runtime.py`：固定平台層——裝置偵測、attention 後端選擇、torch.compile 探測、VRAM 分級。和 `prepare.py` 一樣不要動。
    - `train.py`：主要實驗面。你會反覆修改這個檔案。
 4. 確認資料已存在。檢查 `~/.cache/autoresearch/` 是否有 data shards 與 tokenizer；如果沒有，請告知人類先執行 `uv run prepare.py`。
 5. 初始化 `results.tsv`。建立只有 header 的 TSV，基線結果在第一次 run 後補上。
@@ -51,6 +53,7 @@ uv run train.py
 - 主要指標是 **`val_bpb`**，越低越好。
 - 不要在一次實驗中同時改變太多「制度」級別設定，例如時間預算或評估定義。
 - 不可新增依賴或安裝新套件；只能用 `pyproject.toml` 已經存在的內容。
+- 實驗比較時 seed 保持預設（42）。`AUTORESEARCH_SEED` 環境變數只用於噪音水位量測，不是實驗變因。判斷 keep/discard 時，改善幅度要超過已量得的 run-to-run 噪音才算數。
 
 可以動的是研究變因，不是讓結果不可比較的制度本身。
 
@@ -66,6 +69,7 @@ uv run train.py
 ## 你不能做什麼
 
 - 修改 `prepare.py`
+- 修改 `runtime.py`（平台基礎設施；需要動它就先和人類討論）
 - 修改 evaluation harness
 - 安裝新套件或引入新依賴
 - 用沒有被記錄的手動操作污染實驗

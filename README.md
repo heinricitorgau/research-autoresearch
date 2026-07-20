@@ -10,6 +10,7 @@
 - 2026-04-09：README 與 `program.md` 被重寫成更偏學習導覽與研究 protocol 的版本，重點從專案宣言轉向「這個 repo 可以學到什麼」與「實驗流程怎麼被制度化」。
 - 2026-04-10：專案進一步調整為可在 Apple Silicon 上執行的學習版。依賴不再綁死 CUDA-only `torch`，`train.py` 與 `prepare.py` 加入 `cuda` / `mps` / `cpu` 裝置偵測與 fallback 路徑，並把 Apple Silicon 的預設模型、batch 與數值穩定性設定調得更保守。
 - 2026-04-10：同一天也補上了 `train.py` 輸出判讀說明，讓第一次看到 `val_bpb`、`training_seconds`、`total_seconds`、`peak_vram_mb` 等欄位時，可以直接把 log 當成學習材料來讀。
+- 2026-07-20：加入 Windows + NVIDIA 消費級 GPU（RTX 4060 8GB 實測）支援：FlexAttention 實作真正的 sliding window（FA3 只支援 Hopper）、依 VRAM 分級的預設值、`GQA_RATIO` 超參數、torch 2.6 相容性修正。同時把平台基礎設施抽成 `runtime.py`，讓 `train.py` 回到純實驗面。
 
 ## 這份專案適合誰
 
@@ -176,6 +177,17 @@ uv run train.py
 
 如果你看到 `zsh: command not found: pyenv`，代表你的電腦沒有安裝 `pyenv`。這不是錯誤本身，只表示你不能用 `pyenv` 切版本；只要你已經有可用的 Python 3.10，直接從 `uv sync` 開始就可以。
 
+在 Windows + NVIDIA 上也可以不裝 `uv`，直接用系統 Python（3.10+）與 pip：
+
+```powershell
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+pip install rustbpe tiktoken pyarrow requests pandas matplotlib "triton-windows<3.3"
+python prepare.py
+python train.py
+```
+
+其中 `triton-windows` 是讓 `torch.compile` 在 Windows 上生效的關鍵（PyPI 的 `triton` 沒有 Windows wheel）；`runtime.py` 啟動時會自動把 `CUDA_PATH` 指向它自帶的 CUDA 工具鏈，不需要另外安裝 CUDA Toolkit。torch 2.6+ 實測可用，不必嚴格對齊 `pyproject.toml` 鎖定的版本。
+
 如果你是在 Apple Silicon 上執行，速度和可調參空間通常都不會和 NVIDIA GPU 相同。比較合理的期待是：
 
 1. 先把它跑通，理解整個實驗回圈
@@ -301,10 +313,13 @@ Hi have a look at program.md and let's kick off a new experiment! let's do the s
 
 ```text
 prepare.py      — 固定實驗環境：資料、tokenizer、evaluation、常數
+runtime.py      — 固定平台層：裝置偵測、attention 後端、compile 探測、VRAM 分級
 train.py        — 實驗主體：模型、optimizer、訓練流程
 program.md      — 研究 protocol：agent 的工作規則
 pyproject.toml  — 專案依賴
 ```
+
+`prepare.py` 和 `runtime.py` 都屬於「不隨實驗改動」的固定區；實驗只發生在 `train.py`。這個切分的目的，是讓實驗 diff 永遠只包含研究變因，而不會混進平台管線的修改。
 
 第一次在新機器上執行 `uv sync` 時，`uv` 會依照目前平台重新解析並建立對應的環境；像 Apple Silicon 和 NVIDIA GPU 這種平台差異較大的情況，這比強行共用同一份舊 lockfile 更安全。
 

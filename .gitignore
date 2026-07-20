@@ -21,3 +21,10 @@ dev/
 
 # Results file
 results.tsv
+
+# Run logs and sweep artifacts
+run.log
+run.err.log
+run_seed*.log
+seedstatus.log
+*.pid
