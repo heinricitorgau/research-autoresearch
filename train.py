@@ -498,7 +498,7 @@ WEIGHT_DECAY = device_default(0.2, 0.01, 0.01)      # cautious weight decay for 
 ADAM_BETAS = device_default((0.8, 0.95), (0.9, 0.95), (0.9, 0.95)) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
-FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+FINAL_LR_FRAC = 0.1     # exp11: keep 10% LR at the end (best manual number 1.362; confirm across seeds)
 
 # Model size
 DEPTH = device_default(8, 4, 4)               # number of transformer layers
